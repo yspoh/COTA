@@ -12,8 +12,11 @@ Implementation steps for task 1 (Movie-Music, beta = 20%):
 1) Assuming you already installed pytorch, install -> requirement.txt <-.
 2) Goto -> variable.py <-, change the variable -> absolute_path <- to your own project root, Ray Tune worker require absolute path.
 3) Run Jupyter notebook -> main-train.ipynb <-.
+
 *Note: In training process, Ray Tune save many checkpoints under path ~/ray_results/, they take a lot of space, clean them after training.
+
 *Note: Before training task 3, pretrain book domain with MF, goto -> pretrain.ipynb <-, change the necessary variable.
+
 *Screenshot of training process:
 ![Project Logo](train-example.jpg)
 
