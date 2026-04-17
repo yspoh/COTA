@@ -1,0 +1,2 @@
+# COTA-Cluster-Optimal-Transport-Alignment-for-Cross-Domain-Recommendatio
+Existing CDR (cross-domain recommendation) methods rely on overlapping users and source interaction sequences to learn a preference transfer function, leaving the rich structural information encoded in pre-trained target-domain embeddings largely unexploited. In this paper, we propose COTA, a framework for cross-domain cold-start recommendation.
