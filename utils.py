@@ -310,14 +310,34 @@ def MSELOSS(predicted_ratings, true_ratings):
     squared_difference = (true_ratings - predicted_ratings)**2
     return squared_difference.mean()
 
-def WDLOSS(xs, xt, lambda_e=0.01, numItermax=100, device='cpu'):
+def WDLOSS(xs, xt, lambda_e=0.01, numItermax=100, device='cpu', ot2cs=False):
+    """
+    Wasserstein distance loss (or cosine-sim based alternative).
+
+    If `ot2cs` is True, compute a cosine-similarity based transport proxy
+    (soft assignment via softmax over cosine similarities). Otherwise use
+    the existing OT Sinkhorn computation.
+    """
+    if ot2cs:
+        # Cosine-similarity based proxy (soft assignments via softmax)
+        xs_n = torch.nn.functional.normalize(xs, p=2, dim=1)
+        xt_n = torch.nn.functional.normalize(xt, p=2, dim=1)
+        # Similarity matrix in [-1, 1]
+        S = torch.matmul(xs_n, xt_n.t()).to(device)
+        # Use lambda_e as a temperature (higher lambda_e -> sharper softmax)
+        logits = S / (lambda_e + 1e-8)
+        plan = torch.nn.functional.softmax(logits, dim=1)
+        # We want a loss that decreases as similarity increases -> negative similarity
+        WD = -torch.sum(plan * S)
+        return WD.to(device), plan.to(device)
+
+    # Default: original OT-based implementation
     warnings.filterwarnings("ignore", category=UserWarning, module="ot")
     a = (torch.tensor(ot.utils.unif(xs.size(0)), dtype=torch.float)).to(device)
     b = (torch.tensor(ot.utils.unif(xt.size(0)), dtype=torch.float)).to(device)
     # Compute ground cost matrix 
     M = ot.dist(xs, xt, metric='cosine').to(device)
     # ot.sinkhorn returns the optimal transport matrix, the distance is the final cost
-    # WD = ot.sinkhorn2(a, b, M, lambda_e, numItermax=numItermax, method='sinkhorn_log')
     plan = ot.sinkhorn(a, b, M, reg=lambda_e, method='sinkhorn_log', numItermax=numItermax)
     WD = torch.sum(plan * M)
     return WD.to(device), plan.to(device)

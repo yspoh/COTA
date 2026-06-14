@@ -90,7 +90,8 @@ def train(config, pt_path):
     # recommender
     # Train
     hardRecommender = ClusterOTRecommender(lightgcn_source, lightgcn_target, cluster_size, LAMBDA_E, MAXITER,
-                                            config["num_expert"], config["tau"], config["usepmap"], device)
+                                            config["num_expert"], config["tau"], config["usepmap"], device, 
+                                            config["ot2cs"], config["gs2ste"], config["moe2mlp"])
     hardRecommender = hardRecommender.to(device)
 
     # Optimizer
@@ -178,15 +179,32 @@ def train(config, pt_path):
                     "wd_loss": wd_loss.item(), "MAE": round(newmae, 4), "RMSE": round(newrmse, 4)},checkpoint=checkpoint)
             
             
-def main(source_domain, target_domain, ratio, usepmap, num_expert, taulist,
- lrlist, wdlist, infolist, clusterlist, device, gpus_per_trial=0.25, cpus_per_trial=0.5):
+def main(dataset, source_domain, target_domain, ratio, usepmap, num_expert, taulist,
+ lrlist, wdlist, infolist, clusterlist, device, gpus_per_trial=0.25, cpus_per_trial=0.5, 
+ ot2cs=False, gs2ste=False, moe2mlp=False):
+    dataset = dataset.lower()
+    if dataset not in {"amazon", "douban"}:
+        raise ValueError(f"Unsupported dataset: {dataset}. Expected 'amazon' or 'douban'.")
+
     pre_s_weight_save = mf_weight[f"{source_domain}_100"]
-    pre_t_weight_save = mf_weight[f"{source_domain}_{target_domain}_{ratio}"]
-    weight_save = main_weight[f"{source_domain}_{target_domain}_{ratio}"]
-    pt_path = os.path.join(train_data[f"{source_domain}_{target_domain}_save"], f"{ratio}train.pt")
-    # target->source dict
-    overlap_tgt2src = overlap(os.path.join(overlap_save, f"{target_domain}-{source_domain}-overlap.txt"))
-    print("Starting hyperparameter tuning.")
+    if dataset == "amazon":
+        pre_t_weight_save = mf_weight[f"{source_domain}_{target_domain}_{ratio}"]
+        train_key = f"{source_domain}_{target_domain}_save"
+        overlap_root = overlap_save
+        main_weight_key = f"{source_domain}_{target_domain}_{ratio}"
+    else:
+        pre_t_weight_save = mf_weight[f"{dataset}_{source_domain}_{target_domain}_{ratio}"]
+        train_key = f"{dataset}_{source_domain}_{target_domain}_save"
+        overlap_root = douban_overlap_save
+        main_weight_key = f"{dataset}_{source_domain}_{target_domain}_{ratio}"
+
+    if train_key not in train_data:
+        raise KeyError(f"Train data path missing for key '{train_key}'. Check variable.py for dataset {dataset} source {source_domain} target {target_domain}.")
+
+    weight_save = main_weight.get(main_weight_key, absolute_path + f"data/weight/main/{main_weight_key}/")
+    pt_path = os.path.join(train_data[train_key], f"{ratio}train.pt")
+    overlap_tgt2src = overlap(os.path.join(overlap_root, f"{target_domain}-{source_domain}-overlap.txt"))
+    print(f"Starting hyperparameter tuning on dataset={dataset}, source={source_domain}, target={target_domain}, ratio={ratio}.")
     ray.init(include_dashboard=False)
     config = {
         "lr": tune.grid_search(lrlist),
@@ -196,6 +214,9 @@ def main(source_domain, target_domain, ratio, usepmap, num_expert, taulist,
         "cluster_size": tune.grid_search(clusterlist),
         "infoweight": tune.choice(infolist),
         "usepmap": usepmap,
+        "ot2cs": ot2cs,
+        "gs2ste": gs2ste,
+        "moe2mlp": moe2mlp,
         "pre_s_weight_save": pre_s_weight_save,
         "pre_t_weight_save": pre_t_weight_save,
         "overlap_tgt2src": overlap_tgt2src,

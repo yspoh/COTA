@@ -22,12 +22,17 @@ import collections
 
 # ----- Model Components -----
 class ClusterOTRecommender(nn.Module):
-    def __init__(self, sencoder, tencoder, cluster_size, lambda_e, maxiter, num_experts, tau, usepmap, device):
+    def __init__(self, sencoder, tencoder, cluster_size, lambda_e, maxiter, num_experts, tau, usepmap,
+                  device='cpu', ot2cs=False, gs2ste=False, moe2mlp=False):
         super().__init__()
         self.device = device
         self.cluster_size = cluster_size
         self.lambda_e = lambda_e
         self.maxiter = maxiter
+        # New behavior flags
+        self.ot2cs = ot2cs
+        self.gs2ste = gs2ste
+        self.moe2mlp = moe2mlp
         self.sencoder = sencoder
         self.tencoder = tencoder
         self.num_experts = num_experts
@@ -59,6 +64,10 @@ class ClusterOTRecommender(nn.Module):
             k=2,
             noisy_gating=True
         )
+        # Optional simple MLP alternative to MoE (used when moe2mlp=True)
+        self.mlp = MLP(input_size=sencoder.embed_dim * 4,
+                       output_size=sencoder.embed_dim,
+                       hidden_size=sencoder.embed_dim // 2)
 
     def forward(self, su_idx, tu_idx, ti_idx, cluster=False):
         # Alternative Training (Abandoned if, always go else)
@@ -70,7 +79,7 @@ class ClusterOTRecommender(nn.Module):
             # mappedsp, moe_loss = self.moe(torch.cat([self.sp, self.sp, self.sp], 1), self.sp)
             mappedsp = self.cluster_map(self.sp)
 
-            wdloss, plan = WDLOSS(mappedsp, self.tp, self.lambda_e, self.maxiter, self.device)
+            wdloss, plan = WDLOSS(mappedsp, self.tp, self.lambda_e, self.maxiter, self.device, ot2cs=self.ot2cs)
             self.saved_transport_plan = plan.detach()
 
             return None, wdloss
@@ -86,17 +95,21 @@ class ClusterOTRecommender(nn.Module):
             wdloss = torch.tensor(0.0, device=self.device)
             if self.cluster_size>0 and self.usepmap:
                 mappedsp = self.cluster_map(self.sp)
-                wdloss, plan = WDLOSS(mappedsp, self.tp, self.lambda_e, self.maxiter, self.device)
+                wdloss, plan = WDLOSS(mappedsp, self.tp, self.lambda_e, self.maxiter, self.device, ot2cs=self.ot2cs)
                 self.saved_transport_plan = plan
 
                 # Get the transport probabilities for these specific users
                 # Shape: [batch_size, num_target_clusters]
                 # transport_probs = self.saved_transport_plan[seup_labels.detach()]
                 logits = self.saved_transport_plan[seup_labels]
-                # Normalize so the probabilities sum to 1 for each user (L1 Norm)
-                # target_cluster_indices = torch.argmax(transport_probs, dim=1)
-                # transport_probs = torch.nn.functional.normalize(transport_probs, p=1, dim=1)
-                transport_probs = torch.nn.functional.gumbel_softmax(logits, tau=self.tau, hard=True, dim=1)
+                # Choose sampling method: straight-through estimator or gumbel-softmax
+                if self.gs2ste:
+                    probs = torch.softmax(logits, dim=1)
+                    hard_idx = probs.argmax(dim=1, keepdim=True)
+                    hard = torch.zeros_like(probs).scatter(1, hard_idx, 1.0)
+                    transport_probs = (hard - probs).detach() + probs
+                else:
+                    transport_probs = torch.nn.functional.gumbel_softmax(logits, tau=self.tau, hard=True, dim=1)
                 # Math: [batch, num_clusters] @ [num_clusters, embed_dim] -> [batch, embed_dim]
                 # sdestination = self.tp[target_cluster_indices]
                 sdestination = torch.matmul(transport_probs, self.tp)
@@ -105,7 +118,11 @@ class ClusterOTRecommender(nn.Module):
                 sdestination = seup.detach()
                 mappedsp_input = seup.detach()
 
-            mapped_source, moe_loss = self.moe(torch.cat([seu, seup, sdestination, mappedsp_input], -1))
+            if self.moe2mlp:
+                mapped_source = self.mlp(torch.cat([seu, seup, sdestination, mappedsp_input], -1))
+                moe_loss = torch.tensor(0.0, device=self.device)
+            else:
+                mapped_source, moe_loss = self.moe(torch.cat([seu, seup, sdestination, mappedsp_input], -1))
 
             # s_norm = torch.nn.functional.normalize(mapped_source, p=2, dim=1)
             # t_norm = torch.nn.functional.normalize(teu, p=2, dim=1)
@@ -113,36 +130,40 @@ class ClusterOTRecommender(nn.Module):
 
             return mapped_source, teu, tei, moe_loss, None, wdloss
     
-    def getAll(self, su_idx, si_idx, tu_idx, ti_idx):
-        # get GCN embeddings
-        su_all, _ = self.sencoder()
-        tu_all, ti_all = self.tencoder()
-        seu = su_all[su_idx]
-        sei = su_all[si_idx]
-        teu = tu_all[tu_idx]
-        tei = ti_all[ti_idx]
+    # def getAll(self, su_idx, si_idx, tu_idx, ti_idx):
+    #     # get GCN embeddings
+    #     su_all, _ = self.sencoder()
+    #     tu_all, ti_all = self.tencoder()
+    #     seu = su_all[su_idx]
+    #     sei = su_all[si_idx]
+    #     teu = tu_all[tu_idx]
+    #     tei = ti_all[ti_idx]
 
-        mappedsp, moe_loss_prototypes = self.moe(torch.cat([self.sp, self.sp, self.sp], 1))
+    #     if self.moe2mlp:
+    #         mappedsp = self.mlp_proto(torch.cat([self.sp, self.sp, self.sp], 1))
+    #         moe_loss_prototypes = torch.tensor(0.0, device=self.device)
+    #     else:
+    #         mappedsp, moe_loss_prototypes = self.moe(torch.cat([self.sp, self.sp, self.sp], 1))
 
-        wdloss, plan = WDLOSS(mappedsp, self.tp, self.lambda_e, self.maxiter, self.device)
-        self.saved_transport_plan = plan.detach()
-        seu = su_all[su_idx]
-        teu = tu_all[tu_idx]
-        tei = ti_all[ti_idx]
-        seup, seup_labels = assign_prototype(self.skmeans, seu, self.device)
+    #     wdloss, plan = WDLOSS(mappedsp, self.tp, self.lambda_e, self.maxiter, self.device, ot2cs=self.ot2cs)
+    #     self.saved_transport_plan = plan.detach()
+    #     seu = su_all[su_idx]
+    #     teu = tu_all[tu_idx]
+    #     tei = ti_all[ti_idx]
+    #     seup, seup_labels = assign_prototype(self.skmeans, seu, self.device)
 
-        # Get the transport probabilities for these specific users
-        # Shape: [batch_size, num_target_clusters]
-        transport_probs = self.saved_transport_plan[seup_labels.detach()]
-        # Normalize so the probabilities sum to 1 for each user (L1 Norm)
-        transport_probs = torch.nn.functional.normalize(transport_probs, p=1, dim=1) 
-        # Calculate the "Ideal" destination by weighted sum of target prototypes
-        # Math: [batch, num_clusters] @ [num_clusters, embed_dim] -> [batch, embed_dim]
-        sdestination = torch.matmul(transport_probs, self.tp)
+    #     # Get the transport probabilities for these specific users
+    #     # Shape: [batch_size, num_target_clusters]
+    #     transport_probs = self.saved_transport_plan[seup_labels.detach()]
+    #     # Normalize so the probabilities sum to 1 for each user (L1 Norm)
+    #     transport_probs = torch.nn.functional.normalize(transport_probs, p=1, dim=1) 
+    #     # Calculate the "Ideal" destination by weighted sum of target prototypes
+    #     # Math: [batch, num_clusters] @ [num_clusters, embed_dim] -> [batch, embed_dim]
+    #     sdestination = torch.matmul(transport_probs, self.tp)
 
-        mapped_source, moe_loss = self.moe(torch.cat([seu, seup, sdestination], -1))
+    #     mapped_source, moe_loss = self.moe(torch.cat([seu, seup, sdestination], -1))
 
-        return mappedsp, self.tp, wdloss, mapped_source, seu, sei, teu, tei
+    #     return mappedsp, self.tp, wdloss, mapped_source, seu, sei, teu, tei
 
 
 class SparseDispatcher(object):
